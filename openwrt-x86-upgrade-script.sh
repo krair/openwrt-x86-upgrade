@@ -4,7 +4,7 @@
 #set -e
 
 # install dependencies
-opkg update && opkg install lsblk curl
+opkg update && opkg install lsblk curl rsync
 
 # Set mount point for second OpenWrt installation
 mount_pt=/tmp/mnt
@@ -249,8 +249,8 @@ sed -i '1,/failsafe/{/failsafe/{N;N;d}}' /tmp/boot/boot/grub/grub.cfg
 # Since we used awk to replace the file, restore original permissions
 chmod 755 /tmp/boot/boot/grub/grub.cfg
 
-echo "---Copying configs to new OpenWRT---"
-cp -au /etc/. /tmp/mnt/etc
+echo "---Copying /etc files to new OpenWRT---"
+rsync -aAXP --exclude banner* --exclude openwrt_* --exclude opkg/ --exclude os_release /etc/. /tmp/mnt/etc
 
 echo "---Copying files in sysupgrade.conf---"
 for file in $(awk '!/^[ \t]*#/&&NF' /etc/sysupgrade.conf); do 
@@ -258,7 +258,7 @@ for file in $(awk '!/^[ \t]*#/&&NF' /etc/sysupgrade.conf); do
 	if [ ! -d $directory ]; then
 		mkdir -p "/tmp/mnt${directory}"
 	fi 
-	cp -a $file /tmp/mnt$file
+	rsync -aAXP $file /tmp/mnt$file
 done
 
 echo "---Finished!---"
