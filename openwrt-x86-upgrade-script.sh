@@ -99,6 +99,77 @@ done
 n_logged=$(wc -l < $package_list)
 printf 'Done, logged %d of %d entries\n' "$n_logged" "$examined"
 
+# Image Builder merges profile defaults with our package list. If a user package
+# Conflicts: with a default (e.g. dnsmasq-full vs dnsmasq, wpad-* variants,
+# libustream-openssl vs libustream-mbedtls), the solver fails unless we pass
+# -packagename to drop the default. We use the *target* release profiles.json
+# plus Conflicts: from the running system's opkg control files.
+asu_profiles_json=/tmp/openwrt-asu-profiles-$$.json
+asu_profile_pkgs=/tmp/openwrt-asu-profile-pkgs-$$.txt
+asu_user_pkgs=/tmp/openwrt-asu-user-pkgs-$$.txt
+asu_removals=/tmp/openwrt-asu-removals-$$.txt
+asu_one_conflicts=/tmp/openwrt-asu-one-conflicts-$$.txt
+asu_profiles_url="https://downloads.openwrt.org/releases/${new_release}/targets/x86/64/profiles.json"
+# profiles.generic must match \"profile\": \"generic\" in the JSON request below.
+
+rm -f "$asu_profile_pkgs" "$asu_removals"
+if wget -qO "$asu_profiles_json" "$asu_profiles_url"; then
+	jsonfilter -i "$asu_profiles_json" -e '@.default_packages[*]' >>"$asu_profile_pkgs" 2>/dev/null
+	jsonfilter -i "$asu_profiles_json" -e '@.profiles.generic.device_packages[*]' >>"$asu_profile_pkgs" 2>/dev/null
+	sort -u "$asu_profile_pkgs" -o "$asu_profile_pkgs"
+fi
+
+if [ -s "$asu_profile_pkgs" ]; then
+	awk '!/^-/ { print $1 }' "$package_list" | sort -u >"$asu_user_pkgs"
+	while read -r pkg; do
+		[ -n "$pkg" ] || continue
+		ctl="/usr/lib/opkg/info/${pkg}.control"
+		[ -f "$ctl" ] || continue
+		awk '
+		/^Conflicts:/ {
+			sub(/^Conflicts:[ \t]+/, "")
+			gsub(/ *\([^)]*\)/, "")
+			n = split($0, a, ",")
+			for (i = 1; i <= n; i++) {
+				nm = a[i]
+				sub(/^[ \t]+/, "", nm)
+				sub(/[ \t]+$/, "", nm)
+				if (nm != "") print nm
+			}
+		}
+		' "$ctl" >"$asu_one_conflicts"
+		while read -r confl; do
+			[ -n "$confl" ] || continue
+			grep -qFx "$confl" "$asu_profile_pkgs" || continue
+			grep -qFx "$confl" "$asu_user_pkgs" && continue
+			printf '%s\n' "$confl" >>"$asu_removals"
+		done <"$asu_one_conflicts"
+	done <"$asu_user_pkgs"
+
+	if [ -s "$asu_removals" ]; then
+		sort -u "$asu_removals" -o "$asu_removals"
+		printf 'Prepending -pkg removals for profile defaults that conflict with your selection: '
+		tr '\n' ' ' <"$asu_removals"
+		printf '\n'
+		: >"${package_list}.new"
+		while read -r r; do
+			[ -n "$r" ] || continue
+			grep -q "^-${r}" "$package_list" && continue
+			printf '%s\t%s\n' "-${r}" '' >>"${package_list}.new"
+		done <"$asu_removals"
+		cat "$package_list" >>"${package_list}.new"
+		mv "${package_list}.new" "$package_list"
+	fi
+else
+	printf 'Warning: could not get default package list from %s\n' "$asu_profiles_url"
+	printf '         (network or jsonfilter). Skipping automatic -pkg conflict fixes.\n'
+	if grep -q '^dnsmasq-full' "$package_list" && ! grep -q '^-dnsmasq' "$package_list"; then
+		printf 'Applying dnsmasq-only fallback (-dnsmasq).\n'
+		{ printf '%s\t%s\n' '-dnsmasq' ''; cat "$package_list"; } > "${package_list}.new" && mv "${package_list}.new" "$package_list"
+	fi
+fi
+rm -f "$asu_profiles_json" "$asu_profile_pkgs" "$asu_user_pkgs" "$asu_removals" "$asu_one_conflicts"
+
 ####################################################################
 
 # Build json for Image Builder request
